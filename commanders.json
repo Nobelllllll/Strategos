@@ -1,0 +1,52 @@
+[
+  {
+	"id": "leon_sparta",
+	"name": "Léon de Sparte",
+	"slots": ["general", "commander"],
+	"effects": [
+	  {
+		"hook": "on_damage_before",
+		"scope": { "who": "target", "filter": { "unit_type_is": "Hoplite", "slot_active": "general" } },
+		"conditions": [
+		  { "ally_is_adjacent": { "unit_type": "Hoplite", "pattern": "orthogonal" } }
+		],
+		"actions": [
+		  { "modify_damage_add": -5 }
+		]
+	  },
+	  {
+		"hook": "on_attack_compute",
+		"scope": { "who": "attacker", "filter": { "same_row_as_commander": true } },
+		"conditions": [
+		  { "range_equals": 1 }
+		],
+		"actions": [
+		  { "modify_damage_add": 5 }
+		]
+	  }
+	]
+  },
+  {
+	"id": "gorgos_corinth",
+	"name": "Gorgos de Corinthe",
+	"slots": ["general", "commander"],
+	"effects": [
+	  {
+		"hook": "on_attack_compute",
+		"scope": { "who": "attacker", "filter": { "unit_type_is": "Cavalier", "slot_active": "general" } },
+		"conditions": [],
+		"actions": [
+		  { "modify_damage_add": 5 }
+		]
+	  },
+	  {
+		"hook": "on_damage_before",
+		"scope": { "who": "target", "filter": { "unit_type_is": "Cavalier", "same_row_as_commander": true } },
+		"conditions": [],
+		"actions": [
+		  { "modify_damage_add": -5 }
+		]
+	  }
+	]
+  }
+]

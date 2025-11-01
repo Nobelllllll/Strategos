@@ -1,0 +1,59 @@
+{
+  "Hoplite": {
+	"name": "Hoplite",
+	"class": "Infantry",
+	"hp": 100,
+	"move_range": 1,
+	"attacks": [
+	  {
+		"name": "Coup de lance",
+		"range": 1,
+		"damage": [15]
+	  }
+	],
+	"defenses": [
+	  {
+		"name": "Levé de bouclier",
+		"reduction": 10
+	  }
+	]
+  },
+  "Archer": {
+	"name": "Archer",
+	"class": "Ranged",
+	"hp": 60,
+	"move_range": 1,
+	"attacks": [
+	  {
+		"name": "Tir de flèche",
+		"range": 3,
+		"damage": [15, 10, 5]
+	  }
+	],
+	"defenses": [
+	  {
+		"name": "Esquive",
+		"reduction": 5
+	  }
+	]
+  },
+  "Cavalier": {
+	"name": "Cavalier",
+	"class": "Cavalry",
+	"hp": 80,
+	"move_range": 2,
+	"attacks": [
+	  {
+		"name": "Charge",
+		"range": 1,
+		"damage": [20]
+	  }
+	],
+	"defenses": [
+	  {
+		"name": "Parade à cheval",
+		"reduction": 10
+	  }
+	]
+  }
+}
