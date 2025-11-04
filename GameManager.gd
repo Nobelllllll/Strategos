@@ -1935,4 +1935,3 @@ func _unhandled_input(event):
 		# Changer de vue -> N
 		elif event.keycode == KEY_N:
 			swap_perspective()
-
