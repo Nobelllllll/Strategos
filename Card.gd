@@ -1260,3 +1260,4 @@ func _gui_input(event):
 			# 🟡 Sinon : sélection normale de la carte (main/plateau)
 			game_manager.select_card(self)
 
+
