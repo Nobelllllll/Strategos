@@ -8,7 +8,7 @@ var uid: int = 0
 # Panel + Labels )
 @onready var panel: Panel = $Panel
 @onready var vbox: VBoxContainer = $Panel/VBoxContainer
-@onready var info_container: HBoxContainer = $Panel/VBoxContainer/info_container
+@onready var info_container: HBoxContainer = $Panel/VBoxContainer/BoxContainer/info_container
 @onready var attacks_container: VBoxContainer = $Panel/VBoxContainer/attacks_container
 @onready var label_name: Label = $Panel/VBoxContainer/info_container/Label_Name
 @onready var label_hp: Label = $Panel/VBoxContainer/info_container/Label_HP
@@ -48,11 +48,10 @@ var is_tactic: bool = false
 
 
 # (optionnels, pour plus tard : titre/texte/image)
-@onready var tactic_container: VBoxContainer = $Panel/VBoxContainer/tactic_container if has_node("Panel/VBoxContainer/tactic_container") else null
-@onready var tactic_title: Label = $Panel/VBoxContainer/tactic_container/Tactic_Title if has_node("Panel/VBoxContainer/tactic_container/Tactic_Title") else null
-@onready var tactic_text: Label = $Panel/VBoxContainer/tactic_container/Tactic_Text if has_node("Panel/VBoxContainer/tactic_container/Tactic_Text") else null
-@onready var tactic_image: TextureRect = $Panel/VBoxContainer/tactic_container/Tactic_Image if has_node("Panel/VBoxContainer/tactic_container/Tactic_Image") else null
-
+@onready var tactic_container: VBoxContainer = $Panel/VBoxContainer/tactic_container 
+@onready var tactic_title: Label = $Panel/VBoxContainer/tactic_container/Tactic_Title 
+@onready var tactic_text: Label = $Panel/VBoxContainer/tactic_container/Tactic_Text 
+@onready var tactic_image: TextureRect = $Panel/VBoxContainer/tactic_container/Tactic_Image 
 
 var is_commander: bool = false
 var is_commander_card: bool = false
@@ -251,74 +250,75 @@ func setup_as_tactic(cell_size: Vector2, real_player_color: String, data: Dictio
 	is_tactic = true
 	player_color = real_player_color
 	is_deck_card = true
+	set_meta("tactic_data", data)
 
-	# Taille
-	var card_width = cell_size.x * 0.9
-	var card_height = card_width / 2.0
+	# taille de la carte (comme les autres)
+	var card_width: float = cell_size.x * 0.9
+	var card_height: float = card_width / 2.0
 	custom_minimum_size = Vector2(card_width, card_height)
 	size = custom_minimum_size
 
-	# Couleur du joueur
-	if panel:
+	# style de base (comme les autres)
+	if panel != null:
 		panel.add_theme_stylebox_override("panel", get_default_style())
+		panel.clip_contents = true   # juste pour éviter qu’un texte dépasse
 
-	# Masquer tout ce qui concerne les unités
-	if label_name:
+	# on NE touche PAS au vbox (pas de set_anchors_preset, pas d’alignment ici)
+
+	# masquer ce qui est spécifique aux unités
+	if label_name != null:
 		label_name.text = ""
 		label_name.visible = false
-	if label_hp:
+	if label_hp != null:
 		label_hp.text = ""
 		label_hp.visible = false
-	if has_node("Panel/VBoxContainer/attacks_container"):
-		var ac = get_node("Panel/VBoxContainer/attacks_container")
-		ac.visible = false
+	if attacks_container != null:
+		attacks_container.visible = false
+	
+	if info_container != null:
+		info_container.visible = false
+
+	if attacks_container != null:
+		attacks_container.visible = false
+
 	attacks = []
 	defenses = []
 	update_attack_button_states()
 	update_defense_button_states()
 
-	# (Pour plus tard) Affichage de contenu si fourni
-	var has_any := false
+	# remplir le bloc tactique seulement
 	if tactic_container != null:
 		tactic_container.visible = true
 
-		if tactic_title != null and data.has("title"):
-			var t = str(data["title"])
+		if tactic_title != null:
+			var t := ""
+			if data.has("title"):
+				t = str(data["title"])
 			tactic_title.text = t
 			tactic_title.visible = (t != "")
-			if t != "":
-				has_any = true
-		elif tactic_title != null:
-			tactic_title.text = ""
-			tactic_title.visible = false
-
-		if tactic_text != null and data.has("text"):
-			var tx = str(data["text"])
+		if tactic_text != null:
+			var tx := ""
+			if data.has("text"):
+				tx = str(data["text"])
 			tactic_text.text = tx
 			tactic_text.visible = (tx != "")
-			if tx != "":
-				has_any = true
-		elif tactic_text != null:
-			tactic_text.text = ""
-			tactic_text.visible = false
 
-		if tactic_image != null and data.has("image_path"):
-			var p = str(data["image_path"])
-			if p != "":
-				var tex: Texture2D = load(p)
-				if tex != null:
-					tactic_image.texture = tex
-					tactic_image.visible = true
-					has_any = true
-				else:
-					tactic_image.texture = null
-					tactic_image.visible = false
-			else:
-				tactic_image.texture = null
-				tactic_image.visible = false
+		# image optionnelle
+		if tactic_image != null:
+			var show_image := false
+			if data.has("image_path"):
+				var p := str(data["image_path"])
+				if p != "":
+					var tex: Texture2D = load(p)
+					if tex != null:
+						tactic_image.texture = tex
+						show_image = true
+			tactic_image.visible = show_image
 
-		if not has_any:
-			tactic_container.visible = false
+	# la carte doit pouvoir être cliquée
+	mouse_filter = Control.MOUSE_FILTER_STOP
+
+
 
 func setup_as_commander(cell_size: Vector2, real_player_color: String, data: Dictionary = {}) -> void:
 	is_commander = true
@@ -465,7 +465,6 @@ func _resolve_commander_name(commander_id: String) -> String:
 	
 func update_attack_buttons():
 	if game_manager == null:
-		print("❌ update_attack_buttons ignorée car game_manager est null pour", self.name)
 		return
 	if not has_node("Panel/VBoxContainer/attacks_container"):
 		return

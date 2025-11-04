@@ -44,13 +44,19 @@ var grand_tour: int = 1       # 1, 2, 3, ...
 
 var commanders_data: Array = []
 
+var tactics_data: Array = []
+
+
 
 
 func _ready():
 	# ✅ Charger les données des unités depuis units.json
 	load_units_data()
 	load_commanders_data()
-	
+	load_tactics_data()
+	print("📦 tactics_data n=", tactics_data.size())
+
+
 	# Charger les définitions d’effets
 	EffectsEngine.load_definitions("res://data/commanders.json")
 
@@ -837,15 +843,22 @@ func draw_card_for_current_player():
 
 	var card = card_scene.instantiate() as StrategosCard
 	card.is_deck_card = true
-	card.game_manager = self
+	card.game_manager = self                 # ✅ avant add_child
 	assign_uid_to_card(card)
 
-	# 🪪 Carte TACTIQUE (vierge pour l’instant)
-	var tactic_data := {}  # plus tard: {"title": "...", "text": "...", "image_path": "..."}
+	# 🎴 tirer une vraie tactique
+	var tactic_data := {}
+	if not tactics_data.is_empty():
+		tactic_data = tactics_data.pick_random()
+	else:
+		print("⚠️ Aucune tactique chargée")
+
+	# ✅ ajouter D’ABORD, puis setup (ainsi les @onready sont valides)
+	target_hand.add_child(card)
 	card.setup_as_tactic(cell_size, current_player, tactic_data)
 
-	target_hand.add_child(card)
-	card.update_grayscale()
+	print("🃏 Tactique piochée:", tactic_data.get("id","?"), tactic_data.get("title","(sans titre)"))
+
 	target_hand.update_card_positions()
 	
 	
@@ -1897,6 +1910,17 @@ func load_commanders_data():
 	else:
 		push_error("Impossible de charger commanders.json")
 
+func load_tactics_data():
+	var file = FileAccess.open("res://data/tactics.json", FileAccess.READ)
+	if file:
+		var text = file.get_as_text()
+		var parsed = JSON.parse_string(text)
+		if typeof(parsed) == TYPE_ARRAY:
+			tactics_data = parsed
+		else:
+			push_error("Erreur JSON dans tactics.json : format inattendu")
+	else:
+		push_error("Impossible de charger tactics.json")
 
 
 func _unhandled_input(event):
