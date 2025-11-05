@@ -1,0 +1,53 @@
+[
+  {
+	"id": "tactic_lance_wall",
+	"type": "tactic",
+	"title": "Mur de Lances",
+	"text": "+5 DEF aux unités de cavalerie.",
+	"image_path": "",
+	"class_targets": ["Cavalry"],
+	"effect": {
+	  "stat": "defense",
+	  "delta": 5,
+	  "apply_on_phase": "defense",
+	  "timing": "immediate_or_next",
+	  "consumption": "end_of_phase"
+	},
+	"once": true,
+	"deck_weight": 1
+  },
+  {
+	"id": "tactic_decisive_volley",
+	"type": "tactic",
+	"title": "Volée Décisive",
+	"text": "+5 ATK aux unités à distance.",
+	"image_path": "",
+	"class_targets": ["Ranged"],
+	"effect": {
+	  "stat": "attack",
+	  "delta": 5,
+	  "apply_on_phase": "attack",
+	  "timing": "immediate_or_next",
+	  "consumption": "per_unit_next_attack"
+	},
+	"once": true,
+	"deck_weight": 1
+  },
+  {
+	"id": "tactic_forced_march",
+	"type": "tactic",
+	"title": "Marche Forcée",
+	"text": "+1 de portée de déplacement pour les unités d'infanterie et à distance.",
+	"image_path": "",
+	"class_targets": ["Infantry", "Ranged"],
+	"effect": {
+	  "stat": "move_range",
+	  "delta": 1,
+	  "apply_on_phase": "attack",
+	  "timing": "immediate_or_next",
+	  "consumption": "end_of_phase"
+	},
+	"once": true,
+	"deck_weight": 1
+  }
+]
