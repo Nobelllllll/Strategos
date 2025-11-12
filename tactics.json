@@ -11,7 +11,7 @@
 	  "delta": 5,
 	  "apply_on_phase": "defense",
 	  "timing": "immediate_or_next",
-	  "consumption": "end_of_phase"
+	  "consumption": "normal"
 	},
 	"once": true,
 	"deck_weight": 1
@@ -28,7 +28,7 @@
 	  "delta": 5,
 	  "apply_on_phase": "attack",
 	  "timing": "immediate_or_next",
-	  "consumption": "per_unit_next_attack"
+	  "consumption": "normal"
 	},
 	"once": true,
 	"deck_weight": 1
@@ -45,9 +45,10 @@
 	  "delta": 1,
 	  "apply_on_phase": "attack",
 	  "timing": "immediate_or_next",
-	  "consumption": "end_of_phase"
+	  "consumption": "normal"
 	},
 	"once": true,
 	"deck_weight": 1
   }
 ]
+

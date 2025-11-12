@@ -1,7 +1,7 @@
 extends Control
 
 @export var game_manager: Node = null
-@onready var end_turn_button: Button = $VBoxContainer/EndTurnButton
+@onready var end_turn_button: Button = $VBoxContainer/HBoxContainer/EndTurnButton
 @onready var deck_container: VBoxContainer = $VBoxContainer/DeckContainer
 @onready var tour_label: Label = ($VBoxContainer/TourLabel if has_node("VBoxContainer/TourLabel") else null)
 

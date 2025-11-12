@@ -16,9 +16,23 @@ var current_player: String = ""
 var cards: Dictionary = {}
 var is_flipped_view := false
 
+var tactic_overlay: ColorRect = null
+
 
 func _ready():
 	update_offset()
+	
+	tactic_overlay = ColorRect.new()
+	tactic_overlay.color = Color(0.2, 0.6, 1.0, 0.25)
+	tactic_overlay.mouse_filter = Control.MOUSE_FILTER_STOP  # 👈 bloque tous les clics dessous
+	tactic_overlay.z_index = 1000  # 👈 assure qu’il est tout au-dessus
+	add_child(tactic_overlay)
+	tactic_overlay.visible = false
+	
+	tactic_overlay.gui_input.connect(_on_tactic_overlay_input)
+
+
+
 
 	# ✅ Création initiale pour avoir au moins un plateau vide
 	# (les cartes créées ici auront taille 0 mais seront remplacées)
@@ -202,6 +216,15 @@ func _process(delta):
 			warning_message = ""
 			queue_redraw()
 
+	# afficher/cacher l’overlay de tactique
+	if tactic_overlay != null and game_manager != null:
+		if game_manager.is_tactic_mode:
+			tactic_overlay.visible = true
+			_update_tactic_overlay_rect()
+		else:
+			tactic_overlay.visible = false
+
+
 func _draw():
 	
 
@@ -223,6 +246,11 @@ func _draw():
 		var size = cell_size * 0.9
 		var offset = (cell_size - size) / 2
 		draw_rect(Rect2(pos + offset, size), Color(0.7, 0.7, 0.7, 0.3), true)
+	
+	if game_manager != null:
+		if game_manager.is_tactic_mode:
+			_draw_tactic_overlay()
+
 
 	draw_move_highlights()
 	draw_warning()
@@ -291,8 +319,32 @@ func draw_warning():
 		var x = (size.x - ts) / 2
 		draw_string(font, Vector2(x, 40), warning_message)
 
+func _draw_tactic_overlay() -> void:
+	var cell_size = get_dynamic_cell_size()
+	# le plateau commence à x=1 cellule (car x=0 = généraux)
+	var board_size = Vector2(
+		(board.GRID_WIDTH) * cell_size.x,
+		board.GRID_HEIGHT * cell_size.y
+	)
+	var board_pos = Vector2(1 * cell_size.x, 0)
+
+	var col = Color(0.2, 0.6, 1.0, 0.25)
+	draw_rect(Rect2(board_pos, board_size), col, true)
+
+func _on_tactic_overlay_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if game_manager != null and game_manager.is_tactic_mode:
+			game_manager.apply_current_tactic()
+
+
 func _gui_input(event):
 	if event is InputEventMouseButton and event.pressed:
+		# 1️⃣ priorité au mode tactique
+		if game_manager != null:
+			if game_manager.is_tactic_mode:
+				game_manager.apply_current_tactic()
+				return
+
 		if game_manager:
 			game_manager.click_handled = true
 
@@ -314,18 +366,15 @@ func _gui_input(event):
 
 		# ✅ En mode attaque, clic sur la case seule = annule
 		if game_manager and game_manager.is_attack_mode:
-			# 💡 On ne cible plus les cartes par la case
 			game_manager.cancel_attack_mode()
 			return
-		
-				# ✅ Si une carte de la main est sélectionnée → tentative de POSE
+
+		# ✅ Si une carte de la main est sélectionnée → tentative de POSE
 		if game_manager and game_manager.selected_card_from_deck != null:
-			# Si c'est une carte commandant, on restreint aux cases valides (zone calculée par le GameManager)
 			if game_manager.selected_card_from_deck.is_commander_card:
 				if not game_manager.current_move_zone.has(cell):
 					game_manager._show_warning("Case invalide pour un commandant", 1.2)
 					return
-			# Lance la pose (commande ou carte normale)
 			game_manager.attempt_place(cell)
 			update_cards_positions()
 			queue_redraw()
@@ -340,16 +389,36 @@ func _gui_input(event):
 
 
 
+
 func _notification(what):
 	if what == NOTIFICATION_RESIZED:
 		await get_tree().process_frame
 		update_cards_positions()
 		queue_redraw()
 
-		# ✅ Rafraîchir les styles après un resize
+		if tactic_overlay != null:
+			_update_tactic_overlay_rect()
+
 		if game_manager:
 			for card in cards.values():
 				card.add_theme_stylebox_override("panel", card.get_default_style())
+
+func _update_tactic_overlay_rect() -> void:
+	if tactic_overlay == null:
+		return
+
+	var cell_size = get_dynamic_cell_size()
+
+	# on part de x=0 pour inclure la colonne des commandants
+	var board_pos = Vector2(0, 0)
+	var board_size = Vector2(
+		(board.GRID_WIDTH + 1) * cell_size.x,
+		board.GRID_HEIGHT * cell_size.y
+	)
+
+	tactic_overlay.position = board_pos
+	tactic_overlay.size = board_size
+
 
 
 

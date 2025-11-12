@@ -1,155 +1,308 @@
 extends Node
 class_name EffectsEngine
-# ------------------------------------------------------------------------------
-# EffectsEngine.gd — Moteur d'effets data-driven pour commandants
-#   Hooks : on_move_attempt / on_attack_compute / on_damage_before
-#   Conditions : unit_type_is, ally_is_adjacent, same_row_as_commander,
-#                range_equals, slot_active, move_is_backward_for_owner
-#   Actions    : modify_damage_add, modify_incoming_damage_mult, forbid_move
-# ------------------------------------------------------------------------------
 
-# Registre des effets par hook (statique car on appelle les fonctions en static)
+# --------------------------------------------------------------------
+# Effets commandants
+# --------------------------------------------------------------------
 static var effects_by_hook: Dictionary = {
 	"on_move_attempt": [],
 	"on_attack_compute": [],
 	"on_damage_before": []
 }
 
-# ------------------------------------------------------------------------------
-# Chargement des définitions (JSON ou tableau en mémoire)
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------
+# Tactiques actives pendant la partie
+# On stocke toujours sous la forme :
+#   { "tactic": <dict de la carte>, "grand_tour": <int> }
+# --------------------------------------------------------------------
+static var active_tactics: Dictionary = {
+	"RED": [],
+	"BLUE": []
+}
+
+# --------------------------------------------------------------------
+# Chargement des effets de commandants
+# --------------------------------------------------------------------
 static func load_definitions(defs_source) -> void:
 	var defs: Array = []
 	if typeof(defs_source) == TYPE_STRING:
-		var path: String = defs_source
-		var f := FileAccess.open(path, FileAccess.READ)
+		var f := FileAccess.open(defs_source, FileAccess.READ)
 		if f == null:
-			push_error("EffectsEngine: impossible d'ouvrir " + path)
+			push_error("EffectsEngine: impossible d'ouvrir " + defs_source)
 			return
-		var txt: String = f.get_as_text()
+		var txt := f.get_as_text()
 		var parsed = JSON.parse_string(txt)
 		if typeof(parsed) == TYPE_ARRAY:
 			defs = parsed
-		else:
-			push_error("EffectsEngine: JSON invalide dans " + path)
-			return
 	elif typeof(defs_source) == TYPE_ARRAY:
 		defs = defs_source
 	else:
-		push_error("EffectsEngine: source de définitions inconnue")
 		return
 
-	# Reset propre
+	# reset
 	for k in effects_by_hook.keys():
 		effects_by_hook[k] = []
 
-	# Indexation par hook
 	for e in defs:
 		if typeof(e) != TYPE_DICTIONARY:
 			continue
 		if not e.has("effects"):
 			continue
-		var cid := ""
-		if e.has("id"):
-			cid = str(e["id"])  # ex: "leon_sparta", "gorgos_corinth"
-		
-		var list: Array = e["effects"]
-		for eff in list:
+
+		var cid := str(e.get("id", ""))
+		for eff in e["effects"]:
 			if typeof(eff) != TYPE_DICTIONARY:
 				continue
-			var hook: String = str(eff.get("hook", ""))
+			var hook := str(eff.get("hook", ""))
 			if not effects_by_hook.has(hook):
 				continue
-			
 			eff["_cid"] = cid
-			
-			var arr: Array = effects_by_hook[hook]
-			arr.append(eff)
-			effects_by_hook[hook] = arr
+			effects_by_hook[hook].append(eff)
 
-# ------------------------------------------------------------------------------
-# HOOKS PUBLICS
-# ------------------------------------------------------------------------------
+# ====================================================================
+# ============  TACTIQUES : API publique =============================
+# ====================================================================
 
-# ctx :
-#   { board, player, from: Vector2i, to: Vector2i, mover_card: StrategosCard }
+# appelé par le GameManager quand une carte tactique est jouée
+static func apply_tactic(tactic_data: Dictionary, ctx: Dictionary) -> void:
+	if tactic_data.is_empty():
+		return
+
+	var player := str(ctx.get("current_player", "BLUE"))
+	var phase_at_play := str(ctx.get("current_phase", ""))
+
+	if not active_tactics.has(player):
+		active_tactics[player] = []
+
+	# on clone pour ne pas modifier le JSON d’origine
+	var clone := tactic_data.duplicate(true)
+	clone["_played_phase"] = phase_at_play
+	clone["_player"] = player
+
+	active_tactics[player].append(clone)
+	print("EffectsEngine: tactique activée pour ", player, " en phase ", phase_at_play, ": ", clone.get("id", ""))
+
+
+# Supprime toutes les tactiques d'un joueur qui ont été jouées dans une phase différente
+# de la phase courante.
+static func clear_tactics_for(player: String, current_phase: String) -> void:
+	if not active_tactics.has(player):
+		return
+
+	var kept: Array = []
+	for entry in active_tactics[player]:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var entry_phase: String = entry.get("phase", "")
+		if entry_phase == current_phase:
+			kept.append(entry)
+		# sinon on la laisse tomber
+
+	active_tactics[player] = kept
+
+
+# à appeler au début d’un “grand tour” (depuis GameManager)
+static func clear_tactics_older_than(current_gt: int) -> void:
+	for player in active_tactics.keys():
+		var fresh: Array = []
+		for entry in active_tactics[player]:
+			if typeof(entry) != TYPE_DICTIONARY:
+				continue
+			var e_gt := int(entry.get("grand_tour", 0))
+			if e_gt >= current_gt:
+				fresh.append(entry)
+		active_tactics[player] = fresh
+
+static func clear_all_tactics() -> void:
+	active_tactics["RED"] = []
+	active_tactics["BLUE"] = []
+
+# ====================================================================
+# ============  HOOKS ================================================
+# ====================================================================
+
+# ctx : { board, player, from, to, mover_card, game_manager }
 static func on_move_attempt(ctx: Dictionary) -> Dictionary:
 	var result: Dictionary = {"forbid": false}
+
+	# 1) effets de commandants
 	var list: Array = effects_by_hook["on_move_attempt"]
 	for eff in list:
-		var local_ctx := ctx.duplicate()
+		var local_ctx: Dictionary = ctx.duplicate()
 		local_ctx["_current_effect"] = eff
-		var ok: Dictionary = _evaluate_effect_for_hook(eff, local_ctx, "on_move_attempt")
+		var ok := _evaluate_effect_for_hook(eff, local_ctx, "on_move_attempt")
 		if not ok.get("applies", false):
 			continue
-		# actions
-		var actions: Array = eff.get("actions", [])
-		for a in actions:
+		for a in eff.get("actions", []):
 			if typeof(a) != TYPE_DICTIONARY:
 				continue
-			if a.has("forbid_move"):
-				var forbid_val = a.get("forbid_move", false)
-				var forbid: bool = false
-				if typeof(forbid_val) == TYPE_BOOL:
-					forbid = bool(forbid_val)
-				elif typeof(forbid_val) == TYPE_INT:
-					forbid = int(forbid_val) != 0
-				elif typeof(forbid_val) == TYPE_FLOAT:
-					forbid = float(forbid_val) != 0.0
-				if forbid:
-					result["forbid"] = true
-					return result  # deny-first
+			if a.has("forbid_move") and bool(a["forbid_move"]):
+				result["forbid"] = true
+				return result
+
+	# 2) tactiques
+	var mover_card = ctx.get("mover_card", null)
+	var player := str(ctx.get("player", ""))
+	var ctx_phase := str(ctx.get("current_phase", ""))
+
+	if mover_card != null and player != "" and active_tactics.has(player):
+		for t in active_tactics[player]:
+			if typeof(t) != TYPE_DICTIONARY:
+				continue
+			var eff_t: Dictionary = t.get("effect", {})
+			if eff_t.is_empty():
+				continue
+			if str(eff_t.get("stat", "")) != "move_range":
+				continue
+
+			# phase de jeu de la tactique
+			var played_phase := str(t.get("_played_phase", ""))
+
+			# si la carte dit "je m'applique en attack" mais qu'elle a été jouée en defense → ignorer
+			var required_phase := str(eff_t.get("apply_on_phase", ""))
+			if required_phase != "" and played_phase != "" and required_phase != played_phase:
+				continue
+
+			# filtrage classe
+			var gm = ctx.get("game_manager", null)
+			var class_targets: Array = t.get("class_targets", [])
+			var matches := _unit_matches_tactic_classes(mover_card, gm, class_targets)
+			if not matches:
+				continue
+
+			result["extra_move_range"] = int(eff_t.get("delta", 0))
+
 	return result
 
-# ctx :
-#   { board, attacker: StrategosCard, target: StrategosCard, attack_data: Dictionary, base_damage: int }
+
+
+
+# ctx : { board, attacker, target, attack_data, base_damage, game_manager }
 static func on_attack_compute(ctx: Dictionary) -> Dictionary:
 	var damage: int = int(ctx.get("base_damage", 0))
-	var list: Array = effects_by_hook["on_attack_compute"]
-	for eff in list:
+
+	# 1) effets de commandants
+	for eff in effects_by_hook["on_attack_compute"]:
 		var local_ctx := ctx.duplicate()
 		local_ctx["_current_effect"] = eff
-		var ok: Dictionary = _evaluate_effect_for_hook(eff, local_ctx, "on_attack_compute")
+		var ok := _evaluate_effect_for_hook(eff, local_ctx, "on_attack_compute")
 		if not ok.get("applies", false):
 			continue
-		var actions: Array = eff.get("actions", [])
-		for a in actions:
+		for a in eff.get("actions", []):
 			if typeof(a) != TYPE_DICTIONARY:
 				continue
 			if a.has("modify_damage_add"):
-				var addv = a["modify_damage_add"]
-				if typeof(addv) == TYPE_INT or typeof(addv) == TYPE_FLOAT:
-					damage += int(addv)
-			# modify_incoming_damage_mult est appliqué sur on_damage_before, pas ici
+				damage += int(a["modify_damage_add"])
+
+	# 2) tactiques offensives
+	var attacker_card = ctx.get("attacker", null)
+	var gm = ctx.get("game_manager", null)
+
+	if attacker_card != null and gm != null:
+		var player: String = attacker_card.player_color
+		if active_tactics.has(player):
+			var to_remove: Array = []
+			for t in active_tactics[player]:
+				if typeof(t) != TYPE_DICTIONARY:
+					continue
+				var eff_t: Dictionary = t.get("effect", {})
+				if eff_t.is_empty():
+					continue
+				if str(eff_t.get("stat", "")) != "attack":
+					continue
+
+				# phase où la tactique a été jouée
+				var played_phase := str(t.get("_played_phase", ""))
+				# phase demandée par la tactique (dans le JSON)
+				var required_phase := str(eff_t.get("apply_on_phase", ""))
+				if required_phase != "" and played_phase != "" and required_phase != played_phase:
+					continue
+
+				var class_targets: Array = t.get("class_targets", [])
+				var matches := _unit_matches_tactic_classes(attacker_card, gm, class_targets)
+				if not matches:
+					continue
+
+				damage += int(eff_t.get("delta", 0))
+
+				# consommation
+				var consumption := str(eff_t.get("consumption", ""))
+				if consumption == "per_unit_next_attack":
+					to_remove.append(t)
+
+			for rem in to_remove:
+				active_tactics[player].erase(rem)
+
 	return {"damage": damage}
 
-# ctx :
-#   { board, target: StrategosCard, incoming_damage: int }
+
+
+
+# ctx : { board, target, incoming_damage, game_manager }
 static func on_damage_before(ctx: Dictionary) -> Dictionary:
 	var dmg: int = int(ctx.get("incoming_damage", 0))
-	var list: Array = effects_by_hook["on_damage_before"]
-	for eff in list:
+
+	# 1) effets de commandants
+	for eff in effects_by_hook["on_damage_before"]:
 		var local_ctx := ctx.duplicate()
 		local_ctx["_current_effect"] = eff
-		var ok: Dictionary = _evaluate_effect_for_hook(eff, local_ctx, "on_damage_before")
+		var ok := _evaluate_effect_for_hook(eff, local_ctx, "on_damage_before")
 		if not ok.get("applies", false):
 			continue
-		var actions: Array = eff.get("actions", [])
-		for a in actions:
+		for a in eff.get("actions", []):
 			if typeof(a) != TYPE_DICTIONARY:
 				continue
 			if a.has("modify_incoming_damage_mult"):
-				var multv = a["modify_incoming_damage_mult"]
-				if typeof(multv) == TYPE_INT or typeof(multv) == TYPE_FLOAT:
-					var m: float = float(multv)
-					dmg = int(floor(float(dmg) * m))
-					if dmg < 0:
-						dmg = 0
+				dmg = int(floor(dmg * float(a["modify_incoming_damage_mult"])))
+				if dmg < 0: dmg = 0
 			elif a.has("modify_damage_add"):
-				var addv2 = a["modify_damage_add"]
-				if typeof(addv2) == TYPE_INT or typeof(addv2) == TYPE_FLOAT:
-					dmg += int(addv2)
+				dmg += int(a["modify_damage_add"])
+
+	# 2) tactiques défensives
+	var target_card = ctx.get("target", null)
+	var gm = ctx.get("game_manager", null)
+
+	if target_card != null and gm != null:
+		var player: String = target_card.player_color
+		if active_tactics.has(player):
+			var to_remove: Array = []
+			for t in active_tactics[player]:
+				if typeof(t) != TYPE_DICTIONARY:
+					continue
+				var eff_t: Dictionary = t.get("effect", {})
+
+				if eff_t.is_empty():
+					continue
+				if str(eff_t.get("stat", "")) != "defense":
+					continue
+
+				var played_phase := str(t.get("_played_phase", ""))
+				var required_phase := str(eff_t.get("apply_on_phase", ""))
+				if required_phase != "" and played_phase != "" and required_phase != played_phase:
+					continue
+
+				var class_targets: Array = t.get("class_targets", [])
+				var matches := _unit_matches_tactic_classes(target_card, gm, class_targets)
+				if not matches:
+					continue
+
+				dmg -= int(eff_t.get("delta", 0))
+				if dmg < 0:
+					dmg = 0
+
+				var consumption := str(eff_t.get("consumption", ""))
+				if consumption == "per_unit_next_attack":
+					to_remove.append(t)
+
+			for rem in to_remove:
+				active_tactics[player].erase(rem)
+
 	return {"damage": dmg}
+
+
+
+
+
 
 # ------------------------------------------------------------------------------
 # ÉVALUATION D’UN EFFET POUR UN HOOK
@@ -385,6 +538,7 @@ static func _evaluate_conditions(conds: Array, ent: Dictionary, ctx: Dictionary)
 # UTILITAIRES "Board" / unités
 # ------------------------------------------------------------------------------
 
+
 static func _units_dict_for_owner(board, owner: String) -> Dictionary:
 	if owner == "RED":
 		return board.red_units
@@ -516,6 +670,7 @@ static func _has_commander_for_player_id(board, player: String, commander_id: St
 			if commander_id != "" and str(raw) == commander_id:
 				return true
 		elif typeof(raw) == TYPE_DICTIONARY:
+
 			if raw.has("commander_id"):
 				if commander_id != "" and str(raw["commander_id"]) == commander_id:
 					return true
@@ -523,3 +678,151 @@ static func _has_commander_for_player_id(board, player: String, commander_id: St
 				# ancien format sans id → on ne le compte pas pour un id précis
 				pass
 	return false
+	
+# ------------------------------------------------------------------------------
+# UTILITAIRES "Tactiques"
+# ------------------------------------------------------------------------------
+
+static func _unit_matches_tactic_classes(unit_card, game_manager, class_targets: Array) -> bool:
+	if unit_card == null:
+		return false
+	if game_manager == null:
+		return false
+	if class_targets.is_empty():
+		return false
+
+	var unit_type: String = str(unit_card.get_meta("unit_type", ""))
+	if unit_type == "":
+		return false
+
+	if not game_manager.units_data.has(unit_type):
+		return false
+
+	var unit_info: Dictionary = game_manager.units_data[unit_type]
+	if not unit_info.has("class"):
+		return false
+
+	var unit_class: String = str(unit_info["class"])
+
+	for c in class_targets:
+		if str(c) == unit_class:
+			return true
+
+	return false
+
+static func _tactic_allows_phase(tactic_data: Dictionary, current_phase: String) -> bool:
+	if not tactic_data.has("effect"):
+		return true
+	var eff: Dictionary = tactic_data["effect"]
+	var need := str(eff.get("apply_on_phase", ""))
+	if need == "":
+		return true
+	return need == current_phase
+
+# ------------------------------------------------------------------
+# Helpers pour le POPUP : récupérer les tactiques applicables
+# ------------------------------------------------------------------
+
+static func get_attack_tactics_for_attacker(ctx: Dictionary) -> Array:
+	var out: Array = []
+
+	if not ctx.has("attacker"):
+		return out
+	var attacker = ctx["attacker"]
+	if attacker == null:
+		return out
+
+	var gm = ctx.get("game_manager", null)
+	if gm == null:
+		return out
+
+	var player: String = attacker.player_color
+	if not active_tactics.has(player):
+		return out
+
+	for t in active_tactics[player]:
+		if typeof(t) != TYPE_DICTIONARY:
+			continue
+		if not t.has("effect"):
+			continue
+
+		var eff_t: Dictionary = t["effect"]
+		var stat := str(eff_t.get("stat", ""))
+		if stat != "attack":
+			continue
+
+		# ⚠️ on NE filtre PLUS sur apply_on_phase ici,
+		# parce que le popup peut être appelé en phase "defense"
+		# alors que la tactique est marquée "attack".
+
+		# classes ciblées
+		var class_targets: Array = []
+		if t.has("class_targets"):
+			class_targets = t["class_targets"]
+		var matches := _unit_matches_tactic_classes(attacker, gm, class_targets)
+		if not matches:
+			continue
+
+		out.append({
+			"title": t.get("title", "Tactique"),
+			"delta": int(eff_t.get("delta", 0))
+		})
+
+	return out
+
+
+
+
+static func get_defense_tactics_for_target(ctx: Dictionary) -> Array:
+	# ctx attendu :
+	# {
+	#   "target": StrategosCard,
+	#   "game_manager": GameManager,
+	#   "current_phase": "attack"/"defense"
+	# }
+	var out: Array = []
+
+	if not ctx.has("target"):
+		return out
+	if not ctx.has("game_manager"):
+		return out
+
+	var target = ctx["target"]
+	var gm = ctx["game_manager"]
+	var phase: String = str(ctx.get("current_phase", ""))
+
+	var player: String = target.player_color
+	if not active_tactics.has(player):
+		return out
+
+	for t in active_tactics[player]:
+		if typeof(t) != TYPE_DICTIONARY:
+			continue
+		if not t.has("effect"):
+			continue
+
+		var eff_t: Dictionary = t["effect"]
+		var stat: String = str(eff_t.get("stat", ""))
+		if stat != "defense":
+			continue
+
+		# phase autorisée ?
+		var allowed_phase: String = str(eff_t.get("apply_on_phase", ""))
+		if allowed_phase != "" and phase != "" and phase != allowed_phase:
+			continue
+
+		# classe cohérente ?
+		var class_targets: Array = []
+		if t.has("class_targets"):
+			class_targets = t["class_targets"]
+
+		var matches := _unit_matches_tactic_classes(target, gm, class_targets)
+		if not matches:
+			continue
+
+		out.append({
+			"title": t.get("title", "Tactique"),
+			"delta": eff_t.get("delta", 0)
+		})
+
+	return out

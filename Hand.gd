@@ -61,63 +61,56 @@ func debug_labels(card: Control):
 
 func update_card_positions():
 	var n = get_child_count()
-
 	if n == 0:
 		return
 
-	# ✅ Si Hand.size.x est 0 (pas encore calculé par le layout), on force une largeur par défaut
-	var available_width = size.x
-	if available_width <= 0:
-		# largeur par défaut = taille du plateau pour éviter un calcul explosif
-		available_width = game_manager.renderer.size.x
-
-	# ✅ On récupère la taille des cases du plateau pour que les cartes soient cohérentes
+	# taille du plateau pour rester cohérent
 	var cell_size = game_manager.renderer.get_dynamic_cell_size()
 	if cell_size.x <= 0:
-		# fallback si le plateau n'a pas encore été calculé
 		cell_size = Vector2(120, 60)
 
+	# on garde le même ratio que chez toi
 	var card_width = cell_size.x * 0.9
 	var card_height = card_width / 2.0
 
-	# ✅ Espacement de base
+	# on va empiler VERTICAL
+	var available_height = size.y
+	if available_height <= 0:
+		# si le Hand n'a pas encore de taille, on prend la hauteur du renderer
+		available_height = game_manager.renderer.size.y
+
 	var spacing = base_spacing
 
-	# ✅ Largeur totale avec espacement normal
-	var total_width = n * card_width + (n - 1) * base_spacing
+	# hauteur totale si on mettait les cartes sans chevauchement
+	var total_height = n * card_height + (n - 1) * spacing
 
-	# ✅ Si ça dépasse → chevauchement dynamique
-	if total_width > available_width:
-		spacing = (available_width - n * card_width) / (n - 1)
-		spacing = max(spacing, max_overlap)
+	# si ça dépasse, on réduit l'espacement (comme tu faisais en horizontal)
+	if total_height > available_height:
+		spacing = (available_height - n * card_height) / (n - 1)
+		if spacing < max_overlap:
+			spacing = max_overlap
 
-
-	# ✅ Alignement à gauche
-	var start_x = 0.0
+	# on centre sur X dans la main
+	var x_center = (size.x - card_width) / 2.0
+	# on part du haut
+	var start_y = 0.0
 
 	for i in range(n):
 		var c = get_child(i)
 		c.custom_minimum_size = Vector2(card_width, card_height)
 		c.size = c.custom_minimum_size
 
-		# ✅ CENTRAGE VERTICAL dans le Hand
-		var y_center = (size.y - card_height) / 2.0
+		var y = start_y + i * (card_height + spacing)
+		c.position = Vector2(x_center, y)
 
-		c.position = Vector2(start_x + i * (card_width + spacing), y_center)
-
-		# ✅ Forcer le Panel interne à suivre la taille
 		if c.has_node("Panel"):
 			var p = c.get_node("Panel")
 			p.set_anchors_preset(Control.PRESET_FULL_RECT)
 			p.size = c.size
 
-		# ✅ DEBUG : essayer de voir si le VBoxContainer est compressé
 		if c.has_node("Panel/VBoxContainer"):
 			var vbox = c.get_node("Panel/VBoxContainer")
-			# On met un fond rouge semi-transparent pour voir s'il est dessiné
 			vbox.add_theme_color_override("bg_color", Color(1, 0, 0, 0.5))
-			
-
 
 
 

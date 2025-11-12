@@ -10,6 +10,7 @@ const Board = preload("res://board/Board.gd")
 @export var hand: Node
 @export var hand2: Node
 
+
 var current_player: String = "BLUE"
 var local_perspective_player: String = "BLUE"
 
@@ -45,6 +46,10 @@ var grand_tour: int = 1       # 1, 2, 3, ...
 var commanders_data: Array = []
 
 var tactics_data: Array = []
+
+var is_tactic_mode: bool = false
+var current_tactic_card: StrategosCard = null
+
 
 
 
@@ -304,7 +309,15 @@ func switch_turn():
 		right_panel.update_button_color(current_player == get_local_player())
 		update_tour_ui_label()
 
-		
+		# 🔚 sortir d'un éventuel mode tactique
+	if is_tactic_mode:
+		is_tactic_mode = false
+		if current_tactic_card != null:
+			current_tactic_card.set_selected(false)
+		current_tactic_card = null
+		if renderer != null:
+			renderer.queue_redraw()
+
 	clear_all_targeting()
 
 
@@ -319,6 +332,7 @@ func switch_turn():
 	_on_phase_begin()
 	
 	_clear_attacker_highlights()
+	
 
 
 
@@ -504,11 +518,36 @@ func compute_move_zone_for(origin: Vector2i, current: Vector2i) -> Array[Vector2
 	var zone: Array[Vector2i] = []
 	current_forbidden_zone.clear()
 
-	var move_range = selected_unit_info.get("move_range", 1)
+	# portée de base (celle de l’unité)
+	var move_range: int = selected_unit_info.get("move_range", 1)
 
+	# on récupère la carte réellement sélectionnée (celle sur le plateau)
+	var mover_card: StrategosCard = null
+	if selected_unit_info.has("card"):
+		mover_card = selected_unit_info["card"]
+
+	# ✚ appliquer une éventuelle tactique de déplacement (Marche Forcée)
+	if mover_card != null:
+		var ctx := {
+			"board": board,
+			"player": current_player,
+			"from": origin,
+			"to": origin,
+			"mover_card": mover_card,
+			"game_manager": self,
+			"current_phase": current_phase    # 👈 ajouter ça
+			}
+
+
+		var move_effect := EffectsEngine.on_move_attempt(ctx)
+		if move_effect.has("extra_move_range"):
+			move_range += int(move_effect["extra_move_range"])
+
+	# ensuite on reprend ton BFS normal
 	var visited: Dictionary = {}
 	var frontier: Array = [origin]
 	visited[origin] = 0
+
 
 	while not frontier.is_empty():
 		var current_cell = frontier.pop_front()
@@ -607,8 +646,12 @@ func attempt_move(pos: Vector2i):
 		"player": current_player,
 		"from": current,
 		"to": pos,
-		"mover_card": mover_card
-	}
+		"mover_card": mover_card,
+		"game_manager": self,
+		"current_phase": current_phase    # 👈 ajouter ça
+		}
+
+
 	var move_res := EffectsEngine.on_move_attempt(move_ctx)
 	if move_res.has("forbid") and bool(move_res["forbid"]) == true:
 		_show_warning("Mouvement interdit par le commandement", 1.5)
@@ -811,6 +854,13 @@ func deselect_everything():
 
 	selected_card_from_hand = null
 
+	# ✅ couper le mode tactique aussi
+	if is_tactic_mode:
+		is_tactic_mode = false
+		if current_tactic_card != null:
+			current_tactic_card.set_selected(false)
+		current_tactic_card = null
+
 	selected_unit_info.clear()
 	current_move_zone.clear()
 	current_forbidden_zone.clear()
@@ -820,10 +870,9 @@ func deselect_everything():
 
 	renderer.selected_unit_info.clear()
 	renderer.queue_redraw()
-	
-		# Masquer tous les surlignages (attaquants + cibles)
+
 	_clear_attacker_highlights()
-	refresh_target_blinks_for(null)  # ⇒ cache tous les cadres des cibles
+	refresh_target_blinks_for(null)
 
 
 
@@ -945,21 +994,20 @@ func compute_commander_place_zone() -> Array[Vector2i]:
 	
 
 func _on_phase_begin():
-	# Affiche l'état actuel avant de muter la phase
 	update_tour_ui_label()
+	EffectsEngine.clear_tactics_for(current_player, current_phase)
 
-	# Règle de pioche commandant :
-	# - Grand tour 1 : aucune pioche (phases 1..4)
-	# - Grand tour >= 2 : pioche seulement en phases 1 et 2 (attaque J1, défense J2)
+
 	if grand_tour >= 2:
 		if grand_phase == 1 or grand_phase == 2:
 			draw_commander_card_for_current_player()
 
-	# Avancer le cycle 1→2→3→4 puis grand_tour++
 	grand_phase += 1
 	if grand_phase > 4:
 		grand_phase = 1
 		grand_tour += 1
+		
+
 
 
 
@@ -1334,8 +1382,11 @@ func compute_damage_for_attack(attacker: StrategosCard, target: StrategosCard, a
 		"attacker": attacker,
 		"target": target,
 		"attack_data": atk,
-		"base_damage": base_damage
-	}
+		"base_damage": base_damage,
+		"game_manager": self,
+		"current_phase": current_phase    # 👈 ajouter ça
+}
+
 	var ef_res := EffectsEngine.on_attack_compute(ef_ctx)
 	if ef_res.has("damage"):
 		base_damage = int(ef_res["damage"])
@@ -1345,65 +1396,98 @@ func compute_damage_for_attack(attacker: StrategosCard, target: StrategosCard, a
 
 
 func resolve_round() -> void:
-	print("— Résolution — attaques:", attack_queue.size(),
+	print("— Résolution (agrégée) — attaques:", attack_queue.size(),
 		" | défenses:", defense_queue.size(),
 		" | tour:", turn_number, " | phase:", current_phase)
+
+	# 1) Regrouper toutes les attaques par cible
+	var grouped: Dictionary = {}  # target_card -> Array of {"attacker":card, "atk":dict, "after_off":int, "base_raw":int, "delta_off":int, "atk_name":String}
 
 	for attacker in attack_queue.keys():
 		var info: Dictionary = attack_queue[attacker]
 		var target: StrategosCard = info.get("target", null)
 		var atk: Dictionary = info.get("data", {})
-
-		if target == null:
+		if target == null or atk.is_empty():
 			continue
 
-		var base_damage: int = compute_damage_for_attack(attacker, target, atk)
+		# Base brute (pour logs/preview)
+		var base_dmg := 0
+		var dmg_raw = atk.get("damage", 0)
+		if typeof(dmg_raw) == TYPE_INT or typeof(dmg_raw) == TYPE_FLOAT:
+			base_dmg = int(dmg_raw)
+		elif typeof(dmg_raw) == TYPE_ARRAY:
+			var arr: Array = dmg_raw
+			if not arr.is_empty():
+				var v0 = arr[0]
+				if typeof(v0) == TYPE_INT or typeof(v0) == TYPE_FLOAT:
+					base_dmg = int(v0)
 
-		var reduction_flat: int = 0
+		# Offensif corrigé (commandants + tactiques offensives)
+		var after_off := compute_damage_for_attack(attacker, target, atk)
+		var delta_off := after_off - base_dmg
+
+		if not grouped.has(target):
+			grouped[target] = []
+		grouped[target].append({
+			"attacker": attacker,
+			"atk": atk,
+			"after_off": after_off,
+			"base_raw": base_dmg,
+			"delta_off": delta_off,
+			"atk_name": str(atk.get("name", "Attaque"))
+		})
+
+	# 2) Pour chaque cible, appliquer la défense une SEULE fois sur la somme
+	for target in grouped.keys():
+		var entries: Array = grouped[target]
+		if entries.is_empty():
+			continue
+
+		# somme des offensifs (après on_attack_compute)
+		var total_off := 0
+		for e in entries:
+			total_off += int(e["after_off"])
+
+		# Défense plate (bouton défense) — appliquée UNE seule fois
+		var def_flat := 0
 		if defense_queue.has(target):
 			var ddef: Dictionary = defense_queue[target].get("data", {})
 			if ddef.has("reduction"):
-				reduction_flat = int(ddef["reduction"])
-				if reduction_flat < 0:
-					reduction_flat = 0
+				def_flat = max(0, int(ddef["reduction"]))
 
-		var dmg_after_def := base_damage - reduction_flat
-		if dmg_after_def < 0:
-			dmg_after_def = 0
+		var after_plate := total_off - def_flat
+		if after_plate < 0:
+			after_plate = 0
 
-		# 🔌 HOOK Effets (commandants) — juste avant d'appliquer les dégâts (ex: -20% Hoplite groupé si Général)
+		# Effets défensifs globaux (commandant + tactiques) — UNE seule fois, sur le total
 		var dmg_ctx := {
 			"board": board,
 			"target": target,
-			"incoming_damage": dmg_after_def
+			"incoming_damage": after_plate,
+			"game_manager": self,
+			"current_phase": current_phase
 		}
 		var dmg_res := EffectsEngine.on_damage_before(dmg_ctx)
-		if dmg_res.has("damage"):
-			dmg_after_def = int(dmg_res["damage"])
+		var final_total := int(dmg_res.get("damage", after_plate))
+		if final_total < 0:
+			final_total = 0
 
-		var final_damage: int = dmg_after_def
+		print("[RESOLVE-AGG] Cible:", target.label_name.text, "#", str(target.uid),
+			" | Somme offensif:", total_off,
+			" | -def_plate:", def_flat,
+			" | après_plate:", after_plate,
+			" | final_total:", final_total)
 
-		print("[RESOLVE] ",
-			atk.get("name","?"),
-			" | Att:", attacker.label_name.text, "#", str(attacker.uid),
-			" → Cible:", target.label_name.text, "#", str(target.uid),
-			" | Base:", base_damage,
-			" | -Red:", reduction_flat,
-			" | =Dégâts:", final_damage)
+		apply_damage_to_card(target, final_total)
 
-		apply_damage_to_card(target, final_damage)
-	
+	# 3) Nettoyage comme avant
 	clear_all_targeting()
-	
 	attack_queue.clear()
 	_clear_attacker_highlights()
-
 	defense_queue.clear()
-	
+
 	if renderer:
 		renderer.queue_redraw()
-
-	
 
 
 
@@ -1512,10 +1596,10 @@ func apply_damage_to_card(target: StrategosCard, damage: int) -> void:
 func _compute_preview_damage(attacker: StrategosCard, target: StrategosCard, atk: Dictionary) -> Dictionary:
 	# Renvoie un dict détaillé :
 	# {
-	#   "base": int,              # dégâts après on_attack_compute (bonus d'attaque)
+	#   "base": int,              # dégâts après on_attack_compute (bonus d'attaque + tactiques)
 	#   "reduction_flat": int,    # réduction fixe via défense (bouton défense) si présente
 	#   "after_def": int,         # base - reduction_flat (>=0)
-	#   "after_cmd": int          # après on_damage_before (commandants)
+	#   "after_cmd": int          # après on_damage_before (commandants + tactiques défensives)
 	# }
 	var result := {
 		"base": 0,
@@ -1529,7 +1613,9 @@ func _compute_preview_damage(attacker: StrategosCard, target: StrategosCard, atk
 	if atk == null or atk.is_empty():
 		return result
 
-	# 1) Dégâts de base + effets d’attaque (commandants) via compute_damage_for_attack
+	# 1) Dégâts de base + effets d’attaque (commandants + tactiques offensives)
+	# compute_damage_for_attack doit déjà appeler EffectsEngine.on_attack_compute,
+	# mais on s'assure que le moteur a bien le game_manager dans ce cas.
 	var base_damage := compute_damage_for_attack(attacker, target, atk)
 	if base_damage < 0:
 		base_damage = 0
@@ -1550,13 +1636,16 @@ func _compute_preview_damage(attacker: StrategosCard, target: StrategosCard, atk
 		after_def = 0
 	result["after_def"] = after_def
 
-	# 3) Effets défensifs de commandants (on_damage_before)
+	# 3) Effets défensifs (commandants + TACTIQUES comme "Mur de lances")
 	var final_val := after_def
 	var dmg_ctx := {
 		"board": board,
 		"target": target,
-		"incoming_damage": after_def
-	}
+		"incoming_damage": after_def,
+		"game_manager": self,
+		"current_phase": current_phase    # 👈 ajouter ça
+}
+
 	var dmg_res := EffectsEngine.on_damage_before(dmg_ctx)
 	if dmg_res.has("damage"):
 		final_val = int(dmg_res["damage"])
@@ -1568,124 +1657,334 @@ func _compute_preview_damage(attacker: StrategosCard, target: StrategosCard, atk
 
 
 func build_incoming_preview_bbcode(card: StrategosCard) -> String:
-	var lines: Array = []
-	lines.append("[b]" + card.label_name.text + " #[/b]" + str(card.uid))
+	if card == null or card.cell.x < 0:
+		return ""
 
-	var any_incoming: bool = false
+	var title: String = "[b]" + card.label_name.text + " #[/b]" + str(card.uid)
+	var lines_attack: Array[String] = []
+	var lines_def_once: Array[String] = []
 
-	for attacker in attack_queue.keys():
-		var info: Dictionary = attack_queue[attacker]
-		var target2: StrategosCard = info.get("target", null)
-		var atk2: Dictionary = info.get("data", {})
+	var found_any: bool = false
+	var total_off: int = 0
 
-		if target2 != card or attacker == null or atk2.is_empty():
+	# --- 1) Lister chaque attaquant + cumuler offensif corrigé ---
+	for k in attack_queue.keys():
+		if !(k is StrategosCard):
 			continue
-		any_incoming = true
+		var attacker: StrategosCard = k
+		var info: Dictionary = attack_queue[attacker]
+		var tgt_var: Variant = info.get("target", null)
+		if !(tgt_var is StrategosCard):
+			continue
+		var target2: StrategosCard = tgt_var
 
-		# --- ATTACK: base brute + bonus cmd d’attaque ---
-		var rng: int = int(atk2.get("range", 1))
-		var dmg_raw = atk2.get("damage", 0)  # Variant (int/array)
+		if target2 != card:
+			continue
+
+		var atk: Dictionary = info.get("data", {})
+		if atk.is_empty():
+			continue
+		found_any = true
+
+		# Base brute
+		var rng: int = int(atk.get("range", 1))
+		var dmg_raw: Variant = atk.get("damage", 0)
 		var base_raw: int = 0
-
 		if typeof(dmg_raw) == TYPE_INT or typeof(dmg_raw) == TYPE_FLOAT:
 			base_raw = int(dmg_raw)
 		elif typeof(dmg_raw) == TYPE_ARRAY:
 			var arr: Array = dmg_raw
-			if arr.size() > 0:
+			if not arr.is_empty():
 				var dx: int = abs(attacker.cell.x - card.cell.x)
 				var dy: int = abs(attacker.cell.y - card.cell.y)
-
 				var dist: int = 1
-				if rng == 1:
-					dist = 1
-				else:
+				if rng != 1:
 					if dx > dy:
 						dist = dx
 					else:
 						dist = dy
 					if dist < 1:
 						dist = 1
-
-				var idx: int = dist - 1
-				if idx < 0:
-					idx = 0
-				if idx >= arr.size():
-					idx = arr.size() - 1
-
-				var v = arr[idx]
+				var idx: int = clamp(dist - 1, 0, arr.size() - 1)
+				var v: Variant = arr[idx]
 				if typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT:
 					base_raw = int(v)
-				else:
-					base_raw = 0
-			else:
-				base_raw = 0
-		else:
-			base_raw = 0
 
-		var with_cmd: int = compute_damage_for_attack(attacker, card, atk2)
+		# Offensif corrigé (tactiques + commandant)
+		var with_cmd: int = compute_damage_for_attack(attacker, card, atk)
 		if with_cmd < 0:
 			with_cmd = 0
-		var atk_cmd_bonus: int = with_cmd - base_raw
-		if atk_cmd_bonus < 0:
-			atk_cmd_bonus = 0
 
-		# --- DEFENSE: réduction fixe + bonus cmd défensif ---
-		var red_flat: int = 0
-		if defense_queue.has(card):
-			var ddef: Dictionary = defense_queue[card].get("data", {})
-			if ddef.has("reduction"):
-				var rr: int = int(ddef["reduction"])
-				if rr > 0:
-					red_flat = rr
-
-		var after_def: int = with_cmd - red_flat
-		if after_def < 0:
-			after_def = 0
-
-		var final_val: int = after_def
-		var dmg_ctx := {
+		var atk_tactics_ctx: Dictionary = {
 			"board": board,
+			"attacker": attacker,
 			"target": card,
-			"incoming_damage": after_def
+			"game_manager": self,
+			"current_phase": current_phase
 		}
-		var dmg_res: Dictionary = EffectsEngine.on_damage_before(dmg_ctx)
-		if dmg_res.has("damage"):
-			final_val = int(dmg_res["damage"])
-		if final_val < 0:
-			final_val = 0
+		var atk_tactics: Array = EffectsEngine.get_attack_tactics_for_attacker(atk_tactics_ctx)
+		var sum_atk_tac: int = 0
+		for t in atk_tactics:
+			var tdict: Dictionary = t
+			sum_atk_tac += int(tdict.get("delta", 0))
 
-		var def_cmd_bonus: int = after_def - final_val
-		if def_cmd_bonus < 0:
-			def_cmd_bonus = 0
+		var commander_off: int = with_cmd - base_raw - sum_atk_tac
+		if commander_off < 0:
+			commander_off = 0
 
-		# --- Texte : ATTAQUE puis DÉFENSE ---
-		var atk_name: String = str(atk2.get("name", "Attaque"))
-		lines.append("[color=#d32f2f][b]ATTAQUE[/b][/color]")
-		lines.append("• " + attacker.label_name.text + "  (#" + str(attacker.uid) + ") — " + atk_name)
+		# Sortie “ATTAQUE”
+		var atk_name: String = str(atk.get("name", "Attaque"))
+		lines_attack.append("• " + attacker.label_name.text + "  (#" + str(attacker.uid) + ") — " + atk_name)
+		lines_attack.append("    Base : [b]" + str(base_raw) + "[/b]")
+		for t2 in atk_tactics:
+			var t2d: Dictionary = t2
+			var t_title: String = str(t2d.get("title", "Tactique"))
+			var t_delta: int = int(t2d.get("delta", 0))
+			lines_attack.append("    Tactique : [b]" + t_title + "[/b] : +" + str(t_delta))
+		if commander_off > 0:
+			lines_attack.append("    Bonus commandant : [b]+" + str(commander_off) + "[/b]")
+		lines_attack.append("    Sous-total (attaque) : [b]" + str(with_cmd) + "[/b]")
+		lines_attack.append("")
 
-		var atk_line: String = "    Base : [b]" + str(base_raw) + "[/b]"
-		if atk_cmd_bonus > 0:
-			atk_line += "  |  Bonus commandant : [b]+" + str(atk_cmd_bonus) + "[/b]"
-		lines.append(atk_line)
+		total_off += with_cmd
 
-		lines.append("[color=#2e7d32][b]DÉFENSE[/b][/color]")
-		var showed_def: bool = false
+	if not found_any:
+		return "[b]" + card.label_name.text + "[/b]\n[i]Aucune attaque adverse enregistrée contre cette unité.[/i]"
+
+	# --- 2) Défense unique sur la somme ---
+	var red_flat: int = 0
+	if defense_queue.has(card):
+		var ddef: Dictionary = defense_queue[card].get("data", {})
+		if ddef.has("reduction"):
+			red_flat = max(0, int(ddef["reduction"]))
+
+	var after_plate: int = total_off - red_flat
+	if after_plate < 0:
+		after_plate = 0
+
+	var def_ctx: Dictionary = {
+		"board": board,
+		"target": card,
+		"incoming_damage": after_plate,
+		"game_manager": self,
+		"current_phase": current_phase
+	}
+	var def_res: Dictionary = EffectsEngine.on_damage_before(def_ctx)
+	var final_total: int = int(def_res.get("damage", after_plate))
+	if final_total < 0:
+		final_total = 0
+
+	var def_tactics: Array = EffectsEngine.get_defense_tactics_for_target(def_ctx)
+	var sum_def_tac: int = 0
+	for tt in def_tactics:
+		var ttd: Dictionary = tt
+		sum_def_tac += int(ttd.get("delta", 0))
+
+	var commander_def: int = (after_plate - final_total) - sum_def_tac
+	if commander_def < 0:
+		commander_def = 0
+
+	if red_flat > 0:
+		lines_def_once.append("• Défense : [b]-" + str(red_flat) + "[/b]")
+	for tt2 in def_tactics:
+		var tt2d: Dictionary = tt2
+		var td_title: String = str(tt2d.get("title", "Tactique"))
+		var td_delta: int = int(tt2d.get("delta", 0))
+		lines_def_once.append("• Tactique : [b]" + td_title + "[/b] : -" + str(td_delta))
+	if commander_def > 0:
+		lines_def_once.append("• Bonus commandant : [b]-" + str(commander_def) + "[/b]")
+	if lines_def_once.is_empty():
+		lines_def_once.append("(aucune)")
+
+	# --- 3) Sortie finale ---
+	var out: Array[String] = []
+	out.append(title)
+	out.append("")
+	out.append("[b][color=#CC3333]ATTAQUE (toutes sources)[/color][/b]")
+	for L in lines_attack:
+		out.append(L)
+
+	out.append("")
+	out.append("[b][color=#2E8B57]DÉFENSE (appliquée une fois)[/color][/b]")
+	for L2 in lines_def_once:
+		out.append(L2)
+
+	out.append("")
+	out.append("[b]Total estimé :[/b]  [color=#CC3333]" + str(total_off) + "[/color]  →  [b][color=#2E8B57]" + str(final_total) + "[/color][/b]")
+	return "\n".join(out)
+
+
+func build_outgoing_preview_bbcode(attacker: StrategosCard) -> String:
+	if attacker == null or attacker.cell.x < 0:
+		return ""
+
+	var title: String = "[b]" + attacker.label_name.text + " #[/b]" + str(attacker.uid)
+	var lines_per_target: Array[String] = []
+	var global_before: int = 0
+	var global_after: int = 0
+	var found_any: bool = false
+
+	var by_target: Dictionary = {}
+
+	for k in attack_queue.keys():
+		if !(k is StrategosCard):
+			continue
+		var atk_card: StrategosCard = k
+		if atk_card != attacker:
+			continue
+
+		var info: Dictionary = attack_queue[atk_card]
+		var tgt_v: Variant = info.get("target", null)
+		if !(tgt_v is StrategosCard):
+			continue
+		var target: StrategosCard = tgt_v
+		var atk: Dictionary = info.get("data", {})
+		if atk.is_empty():
+			continue
+
+		found_any = true
+		if not by_target.has(target):
+			by_target[target] = []
+		(by_target[target] as Array).append(atk)
+
+	if not found_any:
+		return "[b]" + attacker.label_name.text + "[/b]\n[i]Aucune attaque enregistrée depuis cette unité.[/i]"
+
+	for target in by_target.keys():
+		var atks: Array = by_target[target]
+		if atks.is_empty():
+			continue
+
+		var per_target_lines: Array[String] = []
+		per_target_lines.append("[b]" + target.label_name.text + " #[/b]" + str(target.uid))
+		per_target_lines.append("[color=#d32f2f][b]ATTAQUE[/b][/color]")
+
+		var total_off: int = 0
+
+		for atk in atks:
+			var rng: int = int(atk.get("range", 1))
+			var dmg_raw: Variant = atk.get("damage", 0)
+			var base_raw: int = 0
+			if typeof(dmg_raw) == TYPE_INT or typeof(dmg_raw) == TYPE_FLOAT:
+				base_raw = int(dmg_raw)
+			elif typeof(dmg_raw) == TYPE_ARRAY:
+				var arr: Array = dmg_raw
+				if not arr.is_empty():
+					var dx: int = abs(attacker.cell.x - target.cell.x)
+					var dy: int = abs(attacker.cell.y - target.cell.y)
+					var dist: int = 1
+					if rng != 1:
+						if dx > dy:
+							dist = dx
+						else:
+							dist = dy
+						if dist < 1:
+							dist = 1
+					var idx: int = clamp(dist - 1, 0, arr.size() - 1)
+					var v: Variant = arr[idx]
+					if typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT:
+						base_raw = int(v)
+
+			var with_cmd: int = compute_damage_for_attack(attacker, target, atk)
+			if with_cmd < 0:
+				with_cmd = 0
+
+			var atk_tactics_ctx: Dictionary = {
+				"board": board,
+				"attacker": attacker,
+				"target": target,
+				"game_manager": self,
+				"current_phase": current_phase
+			}
+			var atk_tactics: Array = EffectsEngine.get_attack_tactics_for_attacker(atk_tactics_ctx)
+			var sum_atk_tac: int = 0
+			for t in atk_tactics:
+				var td: Dictionary = t
+				sum_atk_tac += int(td.get("delta", 0))
+
+			var commander_off: int = with_cmd - base_raw - sum_atk_tac
+			if commander_off < 0:
+				commander_off = 0
+
+			var atk_name: String = str(atk.get("name", "Attaque"))
+			per_target_lines.append("• " + attacker.label_name.text + "  (#" + str(attacker.uid) + ") — " + atk_name)
+			per_target_lines.append("    Base : [b]" + str(base_raw) + "[/b]")
+			for t2 in atk_tactics:
+				var t2d: Dictionary = t2
+				var t_title: String = str(t2d.get("title", "Tactique"))
+				var t_delta: int = int(t2d.get("delta", 0))
+				per_target_lines.append("    Tactique : [b]" + t_title + "[/b] : +" + str(t_delta))
+			if commander_off > 0:
+				per_target_lines.append("    Bonus commandant : [b]+" + str(commander_off) + "[/b]")
+			per_target_lines.append("    Sous-total (attaque) : [b]" + str(with_cmd) + "[/b]")
+			per_target_lines.append("")
+			total_off += with_cmd
+
+		# --- Défense unique ---
+		per_target_lines.append("[color=#2e7d32][b]DÉFENSE DE LA CIBLE (appliquée une fois)[/b][/color]")
+
+		var red_flat: int = 0
+		if defense_queue.has(target):
+			var ddef: Dictionary = defense_queue[target].get("data", {})
+			if ddef.has("reduction"):
+				red_flat = max(0, int(ddef["reduction"]))
+
+		var after_plate: int = total_off - red_flat
+		if after_plate < 0:
+			after_plate = 0
+
+		var def_ctx: Dictionary = {
+			"board": board,
+			"target": target,
+			"incoming_damage": after_plate,
+			"game_manager": self,
+			"current_phase": current_phase
+		}
+		var def_res: Dictionary = EffectsEngine.on_damage_before(def_ctx)
+		var final_total: int = int(def_res.get("damage", after_plate))
+		if final_total < 0:
+			final_total = 0
+
+		var def_tactics: Array = EffectsEngine.get_defense_tactics_for_target(def_ctx)
+		var sum_def_tac: int = 0
+		for tt in def_tactics:
+			var ttd: Dictionary = tt
+			sum_def_tac += int(ttd.get("delta", 0))
+
+		var commander_def: int = (after_plate - final_total) - sum_def_tac
+		if commander_def < 0:
+			commander_def = 0
+
 		if red_flat > 0:
-			lines.append("    Base : [b]-" + str(red_flat) + "[/b]")
-			showed_def = true
-		if def_cmd_bonus > 0:
-			lines.append("    Bonus commandant : [b]-" + str(def_cmd_bonus) + "[/b]")
-			showed_def = true
-		if not showed_def:
-			lines.append("    (aucune)")
+			per_target_lines.append("    Défense : [b]-" + str(red_flat) + "[/b]")
+		for tt2 in def_tactics:
+			var tt2d: Dictionary = tt2
+			var td_title: String = str(tt2d.get("title", "Tactique"))
+			var td_delta: int = int(tt2d.get("delta", 0))
+			per_target_lines.append("    Tactique : [b]" + td_title + "[/b] : -" + str(td_delta))
+		if commander_def > 0:
+			per_target_lines.append("    Bonus commandant : [b]-" + str(commander_def) + "[/b]")
 
-		lines.append("→ Dégâts estimés reçus : [b]" + str(final_val) + "[/b]")
-		lines.append("")
+		per_target_lines.append("→ Dégâts estimés infligés : [b]" + str(final_total) + "[/b]")
+		per_target_lines.append("")
 
-	if not any_incoming:
-		lines.append("[i]Aucune attaque entrante prévue contre cette unité.[/i]")
+		global_before += total_off
+		global_after += final_total
 
-	return "\n".join(lines)
+		for L in per_target_lines:
+			lines_per_target.append(L)
+
+	# --- Sortie ---
+	var out: Array[String] = []
+	out.append(title)
+	out.append("")
+	out.append("[b][color=#CC3333]ATTAQUES ENVOYÉES[/color][/b]")
+	for L in lines_per_target:
+		out.append(L)
+
+	out.append("")
+	out.append("[b]Total estimé (toutes cibles) :[/b]  [color=#CC3333]" + str(global_before) + "[/color]  →  [b][color=#2E8B57]" + str(global_after) + "[/color][/b]")
+	return "\n".join(out)
 
 
 
@@ -1705,12 +2004,17 @@ func _get_defense_flat_for_card(card: StrategosCard) -> Dictionary:
 
 
 # --- Construit le BBCode du pop-up "résolution attendue" pour une carte ciblée ---
-func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
-	# Pas de pop-up sur la colonne commandant
-	if target == null:
+
+func get_hover_breakdown_bbcode(card: StrategosCard) -> String:
+	if card == null or card.cell.x < 0:
 		return ""
-	if target.cell.x < 0:
-		return ""
+
+	if current_phase == "attack":
+		# Vue "attaquant" uniquement pendant la phase d'attaque
+		return build_outgoing_preview_bbcode(card)
+	else:
+		# Vue "défense" uniquement pendant la phase de défense
+		return build_incoming_preview_bbcode(card)
 
 	var lines_attack: Array[String] = []
 	var lines_def: Array[String] = []
@@ -1719,7 +2023,7 @@ func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
 	var total_after := 0
 
 	# Défense éventuelle de la carte (appliquée INDÉPENDAMMENT à chaque attaque entrante)
-	var def_info := _get_defense_flat_for_card(target)
+	var def_info := _get_defense_flat_for_card(card)
 	var def_name := str(def_info["name"])
 	var def_flat := int(def_info["flat"])
 
@@ -1728,7 +2032,7 @@ func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
 	for attacker in attack_queue.keys():
 		var info: Dictionary = attack_queue[attacker]
 		var tgt: StrategosCard = info.get("target", null)
-		if tgt != target:
+		if tgt != card:
 			continue
 		found_any = true
 
@@ -1751,10 +2055,13 @@ func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
 		var off_ctx := {
 			"board": board,
 			"attacker": attacker,
-			"target": target,
+			"target": card,
 			"attack_data": atk,
-			"base_damage": base_dmg
+			"base_damage": base_dmg,
+			"current_phase": current_phase    # 👈 AJOUT
 		}
+
+
 		var off_res := EffectsEngine.on_attack_compute(off_ctx)
 		var after_off := int(off_res.get("damage", base_dmg))
 		var delta_off := after_off - base_dmg
@@ -1769,10 +2076,15 @@ func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
 		# 4) Modifs défensives via commandement (on_damage_before)
 		var def_ctx := {
 			"board": board,
-			"target": target,
-			"incoming_damage": after_defense
+			"target": card,
+			"incoming_damage": after_defense,
+			"current_phase": current_phase,   # 👈 AJOUT
+			"game_manager": self
 		}
+
+
 		var def_res := EffectsEngine.on_damage_before(def_ctx)
+		var def_tactics: Array = EffectsEngine.get_defense_tactics_for_target(def_ctx)
 		var final_dmg := int(def_res.get("damage", after_defense))
 		var delta_def := final_dmg - after_defense  # souvent négatif (réduction)
 
@@ -1799,17 +2111,24 @@ func get_hover_breakdown_bbcode(target: StrategosCard) -> String:
 			if label_def == "":
 				label_def = "Défense"
 			lines_def.append("[color=#2E8B57]   " + label_def + " : -" + str(def_flat) + "[/color]")
+		
+		if not def_tactics.is_empty():
+			for t in def_tactics:
+				var t_title := str(t.get("title", "Tactique"))
+				var t_delta := int(t.get("delta", 0))
+				lines_def.append("[color=#2E8B57]   Tactique — " + t_title + " : -" + str(t_delta) + "[/color]")
+				
 		if delta_def != 0:
 			lines_def.append("[color=#2E8B57]   Modifs commandement (défense) : " + str(delta_def) + "[/color]")
 		lines_def.append("[color=#2E8B57]   Sous-total (après défense/effets) : " + str(final_dmg) + "[/color]")
 
 	# Si aucune attaque ne cible cette carte
 	if not found_any:
-		return "[b]" + target.label_name.text + "[/b]\n[i]Aucune attaque adverse enregistrée contre cette carte.[/i]"
+		return "[b]" + card.label_name.text + "[/b]\n[i]Aucune attaque adverse enregistrée contre cette carte.[/i]"
 
 	# Construction du BBCode final
 	var out: Array[String] = []
-	out.append("[b]" + target.label_name.text + "[/b]")
+	out.append("[b]" + card.label_name.text + "[/b]")
 
 	if not lines_attack.is_empty():
 		out.append("")
@@ -1922,6 +2241,83 @@ func load_tactics_data():
 	else:
 		push_error("Impossible de charger tactics.json")
 
+func select_tactic_card(card: StrategosCard) -> void:
+	# empêcher de jouer une carte adverse
+	if card.player_color != current_player:
+		_show_warning("Vous ne pouvez pas jouer une tactique adverse", 1.5)
+		return
+
+	# 🔄 désélectionner toutes les cartes de main AVANT
+	if hand:
+		for c in hand.get_children():
+			if c is StrategosCard:
+				c.set_selected(false)
+	if hand2:
+		for c in hand2.get_children():
+			if c is StrategosCard:
+				c.set_selected(false)
+
+	# nettoyer la sélection plateau
+	selected_unit_info.clear()
+	if renderer != null:
+		renderer.selected_unit_info.clear()
+
+	# marquer la nouvelle
+	card.set_selected(true)
+	selected_card_from_hand = card
+
+	current_tactic_card = card
+	is_tactic_mode = true
+
+	if renderer != null:
+		renderer.queue_redraw()
+
+
+
+
+func apply_current_tactic() -> void:
+	if current_tactic_card == null:
+		return
+
+	# 1) récupérer les données de la tactique depuis la carte
+	var tactic_data: Dictionary = {}
+	if current_tactic_card.has_meta("tactic_data"):
+		tactic_data = current_tactic_card.get_meta("tactic_data")
+
+	# 🔒 phase autorisée ?
+	if not tactic_data.is_empty():
+		var eff: Dictionary = tactic_data.get("effect", {})
+		var required_phase: String = str(eff.get("apply_on_phase", ""))
+		if required_phase != "" and required_phase != current_phase:
+			_show_warning("Cette tactique n'est pas jouable dans cette phase", 1.5)
+			return
+
+	# 2) construire un contexte complet
+	var ctx := {
+		"board": board,
+		"game_manager": self,
+		"current_player": current_player,
+		"current_phase": current_phase  # 👈 important
+	}
+
+	# 3) dire à l’engine “cette tactique est maintenant active pour ce joueur”
+	if not tactic_data.is_empty():
+		EffectsEngine.apply_tactic(tactic_data, ctx)
+
+	# 4) retirer la carte de la main + sortir du mode tactique
+	current_tactic_card.set_selected(false)
+	if current_tactic_card.get_parent() != null:
+		current_tactic_card.get_parent().remove_child(current_tactic_card)
+	current_tactic_card.queue_free()
+
+	current_tactic_card = null
+	is_tactic_mode = false
+
+	if renderer != null:
+		renderer.queue_redraw()
+
+
+
 
 func _unhandled_input(event):
 	if event is InputEventKey and event.pressed:
@@ -1935,3 +2331,4 @@ func _unhandled_input(event):
 		# Changer de vue -> N
 		elif event.keycode == KEY_N:
 			swap_perspective()
+

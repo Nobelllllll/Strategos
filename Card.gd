@@ -314,6 +314,9 @@ func setup_as_tactic(cell_size: Vector2, real_player_color: String, data: Dictio
 						tactic_image.texture = tex
 						show_image = true
 			tactic_image.visible = show_image
+	
+	set_meta("tactic_data", data)
+	player_color = player_color
 
 	# la carte doit pouvoir être cliquée
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -1120,7 +1123,7 @@ func _show_preview_popup() -> void:
 	_ensure_preview_popup()
 
 	# (Re)remplir le contenu via BBCode
-	var txt := game_manager.build_incoming_preview_bbcode(self)
+	var txt := game_manager.get_hover_breakdown_bbcode(self)
 
 	_preview_label.bbcode_enabled = true
 	_preview_label.text = ""              # reset propre
@@ -1184,6 +1187,16 @@ func _hide_preview_popup() -> void:
 
 
 func _gui_input(event):
+	if event is InputEventMouseButton and event.pressed:
+		if game_manager == null:
+			return
+
+		if is_tactic:  # ton bool que tu mets dans setup_as_tactic
+			game_manager.select_tactic_card(self)
+			return
+
+		# sinon ton comportement normal (sélection d’unité...)
+
 	if event is InputEventMouseMotion:
 		_last_mouse_local = event.position
 		
@@ -1259,5 +1272,3 @@ func _gui_input(event):
 
 			# 🟡 Sinon : sélection normale de la carte (main/plateau)
 			game_manager.select_card(self)
-
-
